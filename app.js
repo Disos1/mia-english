@@ -2,7 +2,7 @@
 import { WORDS, GROUPS, SENTENCE_ITEMS, PASSAGES, RULES, RULE_ITEMS } from './content.js';
 import * as E from './engine.js';
 
-const BUILD = '2026-11-20';
+const BUILD = '2026-11-20b';
 const KEY = 'miaEnglish.v1';
 const WORD = Object.fromEntries(WORDS.map((w) => [w.id, w]));
 const RULE = Object.fromEntries(RULES.map((r) => [r.id, r]));
@@ -177,6 +177,7 @@ async function runLoop() {
     if (token !== loopToken) return;
     E.addActiveTime(sess, performance.now() - t0);
     save();
+    if (sess.n % 8 === 0) sendReport();
   }
   if (token !== loopToken) return;
   endCard();
@@ -186,6 +187,7 @@ function exitSession() {
   loopToken += 1;
   window.speechSynthesis?.cancel?.();
   save();
+  sendReport();
   home();
 }
 
@@ -428,6 +430,7 @@ function endCard() {
   const live = sess;
   const rec = E.finishSession(state);
   save();
+  sendReport();
   const sum = E.wordSummary(state, WORDS);
   const acc = rec.scored ? Math.round((rec.correct / rec.scored) * 100) : 0;
   const why =
@@ -516,6 +519,7 @@ async function runMock() {
 }
 
 function mockResult(res) {
+  sendReport();
   const rows = res.wrong.map((i) => {
     const q = mock.qs[i];
     const a = mock.answers[i];
@@ -539,8 +543,7 @@ const BOX_LABEL = ['לא נבדקה', 'בלמידה', 'כמעט', 'נכון פע
 
 function parent() {
   const sum = E.wordSummary(state, WORDS);
-  const hard = WORDS.map((w) => [w, state.words[w.id]]).filter(([, s]) => s && (s.misses >= 2 || (s.box > 0 && s.box < 3)))
-    .sort((a, b) => b[1].misses - a[1].misses);
+  const hard = hardWords();
   const sb = E.bankSummary(state, SENTENCE_BANK);
   const rb = E.bankSummary(state, RULE_ITEMS);
   const db = E.bankSummary(state, DECODE_BANK);
@@ -588,7 +591,9 @@ function parent() {
       h('div', { class: 'small muted', style: 'margin-top:8px' }, 'דיוק נספר רק בניסיון הראשון. בדיקה של מילה שמיה עוד לא למדה לא נחשבת כטעות.')),
     h('div', { class: 'card small muted' },
       h('div', {}, `השמעה באנגלית: ${canSpeak() ? `פעילה (${enVoice.name})` : 'לא זמינה במכשיר — שאלות "הקשיבי" מדולגות'}`),
-      h('div', {}, `גרסה: ${BUILD}`),
+      h('div', {}, `גרסה: ${BUILD}`)),
+    reportCard(),
+    h('div', { class: 'card small muted' },
       h('div', { class: 'row', style: 'margin-top:10px' },
         h('button', { class: 'btn light', onclick: resetAll }, 'איפוס כל ההתקדמות'))),
   );
@@ -602,7 +607,95 @@ function resetAll() {
   home();
 }
 
-// Leaving mid-session keeps it resumable; nothing else to do on hide.
-document.addEventListener('visibilitychange', () => { if (document.hidden) save(); });
+// Leaving mid-session keeps it resumable; send the latest summary on the way out.
+document.addEventListener('visibilitychange', () => { if (document.hidden) { save(); sendReport(); } });
+
+function hardWords() {
+  return WORDS.map((w) => [w, state.words[w.id]]).filter(([, s]) => s && (s.misses >= 2 || (s.box > 0 && s.box < 3)))
+    .sort((a, b) => b[1].misses - a[1].misses);
+}
+
+// ── one-way daily summary for the Mia Math email ───────────────────────────
+// Progress stays on this tablet. With a pairing key (set once by a parent via
+// the #pair= link or the parent screen) the app POSTs a small summary — counts,
+// hard words, practice-test score — that the daily email shows. Nothing is
+// ever read back. text/plain keeps it a "simple" request: no CORS preflight,
+// so keepalive delivers it even as the tab closes.
+const REPORT_URL = 'https://qstwjwkaiirtqudghiqi.supabase.co/functions/v1/english-report';
+const PAIR_KEY = 'miaEnglish.reportKey';
+const SENT_KEY = 'miaEnglish.reportStatus';
+let lastSentBody = '';
+
+function reportKey() { try { return localStorage.getItem(PAIR_KEY) || ''; } catch { return ''; } }
+function reportStatus() { try { return JSON.parse(localStorage.getItem(SENT_KEY) || 'null'); } catch { return null; } }
+function setReportStatus(v) { try { localStorage.setItem(SENT_KEY, JSON.stringify(v)); } catch {} }
+
+function buildSummary() {
+  const t = today();
+  const sum = E.wordSummary(state, WORDS);
+  const recs = state.sessions.filter((s) => s.day === t);
+  const live = state.current && state.current.day === t ? state.current : null;
+  const add = (f) => recs.reduce((a, s) => a + (s[f] || 0), 0) + (live ? live[f] || 0 : 0);
+  const lastMock = state.mocks.at(-1);
+  const pair = (b) => [b.done, b.total];
+  return {
+    day: t,
+    words: { total: sum.total, sure: sum.sure, once: sum.today, learning: sum.learning, unseen: sum.unseen },
+    hard: hardWords().slice(0, 12).map(([w]) => w.en),
+    today: {
+      minutes: recs.reduce((a, s) => a + (s.minutes || 0), 0) + (live ? E.elapsedMin(live) : 0),
+      sessions: recs.length + (live ? 1 : 0),
+      scored: add('scored'),
+      correct: add('correct'),
+      stars: recs.reduce((a, s) => a + (s.stars || 0), 0),
+    },
+    mock: lastMock ? { score: lastMock.score, day: lastMock.day } : null,
+    banks: {
+      sentences: pair(E.bankSummary(state, SENTENCE_BANK)),
+      rules: pair(E.bankSummary(state, RULE_ITEMS)),
+      decode: pair(E.bankSummary(state, DECODE_BANK)),
+    },
+    build: BUILD,
+  };
+}
+
+function sendReport() {
+  const key = reportKey();
+  if (!key || !navigator.onLine) return;
+  const body = JSON.stringify({ key, summary: buildSummary() });
+  if (body === lastSentBody) return;
+  lastSentBody = body;
+  fetch(REPORT_URL, { method: 'POST', body, keepalive: true, headers: { 'Content-Type': 'text/plain' } })
+    .then((r) => setReportStatus({ at: Date.now(), ok: r.ok, code: r.status }))
+    .catch(() => { lastSentBody = ''; setReportStatus({ at: Date.now(), ok: false, code: 0 }); });
+}
+
+function reportCard() {
+  const key = reportKey();
+  const st = reportStatus();
+  const input = h('input', { type: 'text', placeholder: 'קוד חיבור', dir: 'ltr', style: 'font-size:16px;padding:10px;border-radius:12px;border:2px solid #E3E5EF;flex:1;min-width:0' });
+  const when = st ? new Date(st.at).toLocaleString('he-IL') : '';
+  return h('div', { class: 'card' },
+    h('h2', {}, '📧 דיווח למייל היומי'),
+    h('div', { class: 'small muted' }, 'ההתקדמות נשמרת רק בטאבלט. אם יש קוד חיבור, נשלח סיכום קצר (מספרים, מילים קשות וציון מבחן ניסיון) למייל היומי של Mia Math. שום דבר לא נקרא בחזרה.'),
+    key
+      ? h('div', { style: 'margin-top:8px' },
+          h('div', {}, st ? (st.ok ? `✅ מחובר · נשלח לאחרונה: ${when}` : `⚠️ השליחה האחרונה נכשלה (${st.code || 'אין רשת'}) · ${when}`) : '✅ מחובר · עוד לא נשלח'),
+          h('div', { class: 'row', style: 'margin-top:8px' },
+            h('button', { class: 'btn light', onclick: () => { lastSentBody = ''; sendReport(); setTimeout(parent, 1500); } }, 'שלחי עכשיו'),
+            h('button', { class: 'btn ghost', onclick: () => { if (!confirm('לנתק את הדיווח למייל?')) return; localStorage.removeItem(PAIR_KEY); localStorage.removeItem(SENT_KEY); parent(); } }, 'ניתוק')))
+      : h('div', { class: 'row', style: 'margin-top:8px' },
+          input,
+          h('button', { class: 'btn teal', onclick: () => { const v = input.value.trim(); if (v.length < 16) return; localStorage.setItem(PAIR_KEY, v); lastSentBody = ''; sendReport(); setTimeout(parent, 1500); } }, 'חיבור')));
+}
+
+// One-time pairing link: https://…/mia-english/#pair=<key>
+(function pairFromLink() {
+  const m = location.hash.match(/^#pair=([\w-]{16,100})$/);
+  if (!m) return;
+  try { localStorage.setItem(PAIR_KEY, m[1]); } catch {}
+  history.replaceState(null, '', location.pathname + location.search);
+})();
+sendReport();
 
 home();
