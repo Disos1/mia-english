@@ -13,13 +13,17 @@ const D1 = '2026-11-21', D2 = '2026-11-22', D3 = '2026-11-23';
 function runWordsDay(state, day, { known = new Set(), forgets = new Set(), maxItems = 2000 } = {}) {
   const sess = E.startSession(state, day);
   const log = [];
+  const forgot = new Set(); // a forgotten word fails its first typed check only
   for (let i = 0; i < maxItems; i++) {
     const it = E.pickWordItem(state, sess, WORDS, day);
     if (!it) break;
     log.push(it);
     let outcome;
     if (it.mode === 'probe') outcome = known.has(it.id) ? 'first' : 'fail';
-    else if (it.mode === 'confirm') outcome = forgets.has(it.id) ? 'fail' : 'first';
+    else if (it.mode === 'type') {
+      outcome = forgets.has(it.id) && !forgot.has(it.id) ? 'fail' : 'first';
+      if (outcome === 'fail') forgot.add(it.id);
+    }
     else outcome = 'first';
     if (outcome === 'fail') E.tick(sess); // the learn card
     E.applyWordResult(state, sess, it.id, it.mode, outcome, day);
@@ -70,21 +74,33 @@ test('two days reach the top: every word becomes "sure" (box 4)', () => {
   runWordsDay(st, D1);
   E.finishSession(st);
   const { log } = runWordsDay(st, D2);
-  assert.ok(log.every((l) => l.mode === 'confirm'), 'day 2 opens with cross-day confirmation');
+  assert.ok(log.every((l) => l.mode === 'type'), 'day 2: she types the meaning of every word');
   for (const w of WORDS) assert.equal(st.words[w.id].box, 4, w.id);
   assert.equal(E.wordSummary(st, WORDS).sure, 64);
 });
 
-test('a word forgotten overnight is relearned and needs another day to be sure', () => {
+test('a meaning she cannot type is re-taught by multiple choice, then typed again the same session', () => {
   const st = E.freshState();
   runWordsDay(st, D1);
   E.finishSession(st);
-  runWordsDay(st, D2, { forgets: new Set(['Wednesday']) });
-  assert.equal(st.words.Wednesday.box, 3, 'relearned today, not yet sure');
+  const { log } = runWordsDay(st, D2, { forgets: new Set(['Wednesday']) });
+  const wed = log.filter((l) => l.id === 'Wednesday').map((l) => l.mode);
+  assert.deepEqual(wed, ['type', 'read', 'type'], 'typed miss → find it again → type it again');
+  assert.equal(st.words.Wednesday.box, 4, 'known yesterday + typed today = sure');
   assert.equal(st.words.house.box, 4);
+  assert.equal(st.words.Wednesday.needType, false);
+});
+
+test('a multiple-choice success alone never makes a word sure', () => {
+  const st = E.freshState();
+  runWordsDay(st, D1);
   E.finishSession(st);
-  runWordsDay(st, D3);
-  assert.equal(st.words.Wednesday.box, 4, 'confirmed on day 3');
+  const s2 = E.startSession(st, D2);
+  // same-day multiple choice keeps it at box 3; only a typed answer promotes
+  E.applyWordResult(st, s2, 'house', 'recheck', 'first', D2);
+  assert.equal(st.words.house.box, 3);
+  E.applyWordResult(st, s2, 'house', 'type', 'first', D2);
+  assert.equal(st.words.house.box, 4);
 });
 
 test('spacing: a missed word does not come straight back, and the loop is bounded', () => {
@@ -168,6 +184,14 @@ test('plan: day 1 favours words, later days cover all three blocks within 30 min
   E.startSession(st, D1); E.finishSession(st);
   assert.equal(E.practiceDayIndex(st, D2), 2);
   assert.equal(E.practiceDayIndex(st, D1), 1);
+  // day 2: the first session leans on typing, the second ends with the mock
+  assert.equal(E.planFor(2, 1)[0].until, 16);
+  assert.deepEqual(E.planFor(2, 2).map((b) => b.block), ['words', 'sentences', 'rules', 'mock']);
+  assert.equal(E.planFor(3, 1).at(-1).until, 30);
+  const s1 = E.startSession(st, D2); assert.equal(s1.nth, 1); E.finishSession(st);
+  const s2 = E.startSession(st, D2); assert.equal(s2.nth, 2);
+  s2.extraUntil = 10; E.finishSession(st);
+  assert.equal(E.startSession(st, D2).nth, 2, '"+10 minutes" sessions do not count');
 });
 
 test('mock: 100 points, weakest words first, results flow back into the ladder', () => {
@@ -185,7 +209,7 @@ test('mock: 100 points, weakest words first, results flow back into the ladder',
   assert.equal(res.score, 98);
   assert.equal(st.words.scissors.box, 1);
   const other = qs.find((q) => q.kind === 'meaning' && q.word.id !== 'scissors').word.id;
-  assert.equal(st.words[other].box, 4, 'cold success on a second day = sure');
+  assert.equal(st.words[other].box, 3, 'a multiple-choice mock answer does not make a word sure');
   const noHear = E.buildMock(st, { words: WORDS, sentenceItems: SENTENCE_ITEMS, passages: PASSAGES, ruleItems: RULE_ITEMS, canHear: false });
   assert.ok(noHear.every((q) => q.kind !== 'rule' || q.item.kind !== 'hear'));
 });
@@ -210,4 +234,84 @@ test('spelling check ignores case and spacing, honours accepted variants', () =>
   assert.ok(!E.isCorrectSpelling(w, 'wensday'));
   assert.ok(E.isCorrectSpelling(WORDS.find((x) => x.id === 'favorite'), 'favourite'));
   assert.ok(!E.isCorrectSpelling(w, ''));
+});
+
+// ── typed Hebrew meaning ───────────────────────────────────────────────────
+
+const W = Object.fromEntries(WORDS.map((w) => [w.id, w]));
+const ok = (id, typed) => ['exact', 'typo'].includes(E.checkMeaning(W[id], typed, WORDS).verdict);
+
+test('typed meaning: every accepted form of every word is exact', () => {
+  for (const w of WORDS) for (const f of E.heForms(w)) assert.equal(E.checkMeaning(w, f.raw, WORDS).verdict, 'exact', `${w.id} ${f.raw}`);
+  assert.ok(ok('teacher', 'המורה'), 'leading ה is optional');
+  assert.ok(ok('school', 'בֵּית סֵפֶר'), 'niqqud ignored');
+  assert.ok(ok('school', 'ביתספר'), 'spaces ignored');
+  assert.ok(ok('grade', 'כיתה') && ok('class', 'כיתה'), 'shared meaning accepted for both');
+});
+
+test('typed meaning: another word\'s meaning is never accepted', () => {
+  for (const t of WORDS) {
+    const own = new Set(E.heForms(t).map((f) => f.n));
+    for (const o of WORDS) {
+      if (o === t) continue;
+      for (const f of E.heForms(o)) {
+        if (own.has(f.n)) continue;
+        const r = E.checkMeaning(t, f.raw, WORDS);
+        assert.ok(!['exact', 'typo'].includes(r.verdict), `${t.id} accepted "${f.raw}" (${o.id})`);
+      }
+    }
+  }
+  assert.equal(E.checkMeaning(W.Tuesday, 'שני', WORDS).other.id, 'Monday');
+  assert.equal(E.checkMeaning(W.scissors, 'מספר', WORDS).other.id, 'number');
+  assert.equal(E.checkMeaning(W.brother, 'אחות', WORDS).other.id, 'sister');
+});
+
+test('typed meaning: Hebrew typos a child makes are forgiven', () => {
+  const typos = [
+    ['teacher', 'מורא'], ['bird', 'צפור'], ['pencil', 'עפרון'], ['pencil', 'איפרון'], ['scissors', 'מספרים'],
+    ['chair', 'כסא'], ['chair', 'קיסא'], ['notebook', 'מכברת'], ['thanks', 'טודה'], ['lesson', 'שעור'],
+    ['math', 'מטמטיקה'], ['sports', 'ספורת'], ['week', 'שבוא'], ['Wednesday', 'יום רבעי'], ['Thursday', 'יום כמישי'],
+    ['happy', 'סמח'], ['meet', 'להפגש'], ['street', 'רכוב'], ['address', 'קתובת'], ['please', 'בבקשא'],
+    ['lunch', 'ארוחט צהרים'], ['grandpa', 'סבה'], ['brother', 'אך'], ['name', 'שים'], ['paper', 'ניר'],
+    ['English', 'אנגלט'], ['fly', 'לאוף'], ['need', 'צריח'], ['computer', 'מכשב'], ['phone', 'תלפון'],
+    ['food', 'אכל'], ['pupil', 'טלמיד'], ['grade', 'כיתא'], ['school', 'בית סיפר'], ['homework', 'שיעורי בייט'],
+  ];
+  for (const [id, t] of typos) assert.equal(E.checkMeaning(W[id], t, WORDS).verdict, 'typo', `${id} ${t}`);
+  // generated: one sound-alike swap, one dropped ו/י, or two swapped letters
+  const swaps = { 'א': 'ע', 'ע': 'א', 'ה': 'א', 'ט': 'ת', 'ת': 'ט', 'כ': 'ח', 'ח': 'כ', 'ק': 'כ', 'ס': 'ש', 'ש': 'ס' };
+  let tot = 0, good = 0;
+  for (const w of WORDS) for (const f of E.heForms(w).slice(0, 2)) {
+    const s = f.raw, vars = new Set();
+    for (let i = 0; i < s.length; i++) {
+      if (swaps[s[i]]) vars.add(s.slice(0, i) + swaps[s[i]] + s.slice(i + 1));
+      if ('יו'.includes(s[i])) vars.add(s.slice(0, i) + s.slice(i + 1));
+      if (i > 0 && s[i] !== ' ' && s[i - 1] !== ' ') vars.add(s.slice(0, i - 1) + s[i] + s[i - 1] + s.slice(i + 1));
+    }
+    for (const v of vars) { if (v === s) continue; tot++; if (ok(w.id, v)) good++; }
+  }
+  assert.ok(good / tot >= 0.95, `generated typos accepted ${good}/${tot}`);
+});
+
+test('typed meaning: unrelated answers, English letters and blanks', () => {
+  assert.equal(E.checkMeaning(W.house, 'חתול', WORDS).verdict, 'wrong');
+  assert.equal(E.checkMeaning(W.happy, 'עצוב', WORDS).verdict, 'wrong');
+  assert.equal(E.checkMeaning(W.house, 'house', WORDS).verdict, 'latin');
+  assert.equal(E.checkMeaning(W.house, '  ', WORDS).verdict, 'empty');
+  assert.equal(E.checkMeaning(W.house, '123', WORDS).verdict, 'empty');
+});
+
+test('parent approval: the answer is accepted from now on and the word gets its credit', () => {
+  const st = E.freshState();
+  runWordsDay(st, D1);
+  E.finishSession(st);
+  const s2 = E.startSession(st, D2);
+  E.applyWordResult(st, s2, 'nice', 'type', 'fail', D2);
+  E.logTyped(st, { day: D2, id: 'nice', typed: 'חמוד', at: 1 });
+  assert.equal(E.checkMeaning(W.nice, 'חמוד', WORDS, st.heExtra).verdict, 'wrong');
+  assert.ok(E.approveTyped(st, 0));
+  assert.equal(E.checkMeaning(W.nice, 'חמוד', WORDS, st.heExtra).verdict, 'exact');
+  assert.equal(st.words.nice.box, 4);
+  assert.equal(st.typedLog.length, 0);
+  // and it no longer waits for a typed recheck
+  assert.ok(!Object.values(st.words).some((w) => w.needType));
 });

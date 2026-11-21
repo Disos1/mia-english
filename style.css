@@ -130,3 +130,7 @@ td, th { padding: 6px 4px; border-bottom: 1px solid #EEF0F7; text-align: right; 
   .slot { width: 40px; height: 52px; font-size: 26px; }
   .tile { width: 48px; height: 56px; font-size: 26px; }
 }
+
+.he-input { display: block; width: 100%; box-sizing: border-box; font: 800 28px 'Heebo', sans-serif; text-align: center; padding: 14px; margin: 8px 0; border: 3px solid #E3E5EF; border-radius: 18px; background: #fff; color: var(--navy); }
+.he-input:focus { outline: none; border-color: var(--sky); }
+.he-input:disabled { background: #F6F7FB; }

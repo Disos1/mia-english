@@ -6,7 +6,7 @@ const Q = V ? `?v=${encodeURIComponent(V)}` : '';
 const { WORDS, GROUPS, SENTENCE_ITEMS, PASSAGES, RULES, RULE_ITEMS } = await import(`./content.js${Q}`);
 const E = await import(`./engine.js${Q}`);
 
-const BUILD = '2026-11-21b'; // keep equal to version.json
+const BUILD = '2026-11-21c'; // keep equal to version.json
 let updateReady = false; // a newer build was published; reload at the next safe screen
 const KEY = 'miaEnglish.v1';
 const WORD = Object.fromEntries(WORDS.map((w) => [w.id, w]));
@@ -100,6 +100,13 @@ function home() {
   const lastMock = state.mocks.at(-1);
   const pct = (n) => `${(n / sum.total) * 100}%`;
   const doneToday = state.sessions.some((s) => s.day === today());
+  const nthNext = resume ? state.current.nth ?? 1 : state.sessions.filter((s) => s.day === today() && !s.extra).length + 1;
+  const plan = E.planFor(dayIdx, nthNext);
+  const planText = resume ? 'ממשיכות מאיפה שעצרנו' :
+    plan.some((b) => b.block === 'mock') ? 'חזרה קצרה, ואז מבחן ניסיון 📝' :
+    dayIdx <= 1 ? 'כ-30 דקות: מילים, משפטים וקריאה' :
+    dayIdx === 2 && nthNext === 1 ? 'כ-30 דקות: לכתוב את הפירושים בעצמך ✍️, משפטים וקריאה' :
+    'כ-30 דקות: חזרה על מילים, משפטים וקריאה';
 
   mount(
     h('div', { class: 'spread' },
@@ -117,14 +124,16 @@ function home() {
         h('div', {}, h('span', { class: 'dot', style: 'background:var(--sky)' }), `ידעת פעם אחת: ${sum.today}`),
         h('div', {}, h('span', { class: 'dot', style: 'background:var(--yellow)' }), `בלמידה: ${sum.learning}`),
         h('div', {}, h('span', { class: 'dot', style: 'background:#EEF0F7' }), `עוד לא פגשנו: ${sum.unseen}`)),
-      h('div', { class: 'small muted', style: 'margin-top:8px' }, '"יודעת בטוח" = ידעת את הפירוש בשני ימים שונים. ככה המילה נשארת בזיכרון!')),
+      h('div', { class: 'small muted', style: 'margin-top:8px' }, '"יודעת בטוח" = ידעת לבחור את הפירוש, ובאימון של יום אחר גם כתבת אותו בעצמך ✍️')),
     h('button', { class: 'btn big coral', onclick: startPractice },
       resume ? '▶️ להמשיך את האימון' : doneToday ? '➕ עוד אימון' : '🚀 האימון של היום'),
     h('div', { class: 'small muted', style: 'text-align:center;margin:8px 0 16px' },
-      resume ? 'ממשיכות מאיפה שעצרנו' : dayIdx <= 1 ? 'כ-30 דקות: מילים, משפטים וקריאה' : 'כ-30 דקות: חזרה על מילים, משפטים וקריאה'),
+      planText),
     h('button', { class: 'btn big purple', onclick: mockIntro }, '📝 מבחן ניסיון'),
     h('div', { class: 'small muted', style: 'text-align:center;margin:8px 0 16px' },
-      lastMock ? `בפעם האחרונה: ${lastMock.score}` : 'הכי טוב ביום ראשון בערב, אחרי האימון'),
+      lastMock ? `בפעם האחרונה: ${lastMock.score}` :
+        dayIdx <= 1 ? 'הוא יגיע בסוף האימון השני של מחר' :
+        dayIdx === 2 && nthNext <= 2 ? 'הוא יגיע בסוף האימון השני של היום' : 'אפשר לעשות אותו בכל זמן'),
     h('div', { class: 'row center' }, h('button', { class: 'btn ghost', onclick: parent }, 'להורים')),
   );
 }
@@ -137,8 +146,13 @@ const ruleItems = () => RULE_ITEMS.filter((r) => r.kind !== 'hear' || canSpeak()
 
 // A "+10 minutes" session has one deadline and works words → sentences →
 // rules, taking whatever is still open; a normal session follows the day plan.
+function sessionPlan() {
+  return sess.extraUntil
+    ? ['words', 'sentences', 'rules', 'decode'].map((block) => ({ block, until: sess.extraUntil }))
+    : E.planFor(sess.dayIndex, sess.nth ?? 1);
+}
 function sessionTotal() {
-  return sess.extraUntil || E.planFor(sess.dayIndex).at(-1).until;
+  return Math.max(...sessionPlan().map((b) => b.until).filter(Number.isFinite));
 }
 
 function pickIn(block, t) {
@@ -150,12 +164,12 @@ function pickIn(block, t) {
 
 function nextItem() {
   const t = today();
-  const plan = sess.extraUntil
-    ? ['words', 'sentences', 'rules', 'decode'].map((block) => ({ block, until: sess.extraUntil }))
-    : E.planFor(sess.dayIndex);
+  const plan = sessionPlan();
   while (sess.blockIdx < plan.length) {
     const b = plan[sess.blockIdx];
-    if (E.elapsedMin(sess) < b.until) {
+    if (b.block === 'mock') {
+      if (!sess.mockDone) return { block: 'mock' };
+    } else if (E.elapsedMin(sess) < b.until) {
       const item = pickIn(b.block, t);
       if (item) return { block: b.block, item };
     }
@@ -175,6 +189,11 @@ async function runLoop() {
   for (;;) {
     const next = nextItem();
     if (!next) break;
+    if (next.block === 'mock') {
+      await mockInSession();
+      if (token !== loopToken) return;
+      continue;
+    }
     const t0 = performance.now();
     if (next.block === 'words') await doWord(next.item);
     else if (next.block === 'sentences') await doBank(next.item, 'sentences');
@@ -216,6 +235,7 @@ const MODE_TAG = {
   read: '🔎 מצאי את המילה באנגלית',
   recheck: '🔁 עוד פעם אחת, לחיזוק',
   confirm: '🔁 זוכרת מאתמול?',
+  type: '✍️ כתבי את הפירוש בעצמך',
 };
 
 function teachNode(w) {
@@ -235,16 +255,83 @@ function wordItem(w, mode, { mock = false } = {}) {
       opts: E.lookAlikeOptions(w, WORDS).map((x) => x.en), speakWord: !mock && canSpeak() };
   }
   const opts = E.meaningOptions(w, WORDS).map((x) => (mode === 'pic' ? `${x.emoji}  ${E.cleanHe(x.he)}` : E.cleanHe(x.he)));
-  return { id: w.id, kind: 'wmean', word: w, tag: mock ? null : MODE_TAG[mode], opts };
+  // Multiple choice says the word as it appears (sound + print together);
+  // the mock stays silent like the paper exam.
+  return { id: w.id, kind: 'wmean', word: w, tag: mock ? null : MODE_TAG[mode], opts, speakWord: !mock && canSpeak() };
 }
 
 async function doWord(item) {
   const w = WORD[item.id];
+  if (item.mode === 'type') {
+    const ok = await typeView(w);
+    if (!ok) E.tick(sess); // the teaching card
+    E.applyWordResult(state, sess, w.id, 'type', ok ? 'first' : 'fail', today());
+    return;
+  }
   const it = wordItem(w, item.mode);
   it.expNode = teachNode(w);
   const ok = await mcView(it, 'words', { feedback: true });
   if (!ok) E.tick(sess); // the teaching card
   E.applyWordResult(state, sess, w.id, item.mode, ok ? 'first' : 'fail', today());
+}
+
+/**
+ * The last step of the ladder: she reads the English word (no sound) and types
+ * its Hebrew meaning. Typos are forgiven (E.checkMeaning); English letters
+ * are not counted and she may retype. One real attempt.
+ */
+function typeView(w) {
+  return new Promise((resolve) => {
+    let done = false;
+    const input = h('input', {
+      type: 'text', class: 'he-input', dir: 'rtl', lang: 'he', placeholder: 'הפירוש בעברית…',
+      autocapitalize: 'none', autocomplete: 'off', autocorrect: 'off', spellcheck: 'false', enterkeyhint: 'done',
+    });
+    const note = h('div', { class: 'small', style: 'text-align:center;min-height:24px;color:var(--bad)' });
+    const after = h('div');
+    const checkBtn = h('button', { class: 'btn coral', onclick: () => submit(false) }, 'בדיקה ✓');
+    const dunnoBtn = h('button', { class: 'btn ghost', onclick: () => submit(true) }, 'לא יודעת');
+    const buttons = h('div', { class: 'row center' }, checkBtn, dunnoBtn);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(false); } });
+
+    async function submit(dunno) {
+      if (done) return;
+      const typed = input.value.trim();
+      const r = dunno ? { verdict: 'wrong' } : E.checkMeaning(w, typed, WORDS, state.heExtra);
+      if (r.verdict === 'empty') { note.textContent = 'כתבי את הפירוש בעברית ✍️'; input.focus(); return; }
+      if (r.verdict === 'latin') { note.textContent = 'כתבי באותיות בעברית 🙂 (החליפי שפה במקלדת 🌐)'; input.focus(); return; }
+      done = true;
+      input.disabled = true;
+      buttons.remove();
+      note.textContent = '';
+      input.blur();
+      speak(w.en);
+      if (r.verdict === 'exact' || r.verdict === 'typo') {
+        after.replaceChildren(
+          h('div', { class: 'fb good' }, pick(['נכון! 🎉', 'מעולה! ⭐', 'יש! 🙌'])),
+          r.verdict === 'typo' ? h('div', { class: 'stat', style: 'text-align:center' }, 'ככה כותבים: ', h('strong', {}, r.form)) : null);
+        await wait(r.verdict === 'typo' ? 2200 : 1200);
+        return resolve(true);
+      }
+      if (!dunno && typed) E.logTyped(state, { day: today(), id: w.id, typed, at: Date.now(), other: r.other?.id ?? null });
+      after.replaceChildren(
+        r.verdict === 'other'
+          ? h('div', { class: 'explain' }, '💡 ', `"${typed}" זה `, en(r.other.en), '. המילה כאן אחרת:')
+          : null,
+        teachNode(w),
+        h('div', { class: 'row center' }, h('button', { class: 'btn coral', onclick: () => resolve(false) }, 'המשך ←')));
+    }
+
+    mount(
+      topbar('words'),
+      h('div', { class: 'card' },
+        h('div', { style: 'text-align:center' }, h('span', { class: 'mode-tag' }, MODE_TAG.type)),
+        h('div', { class: 'bigword en', style: 'margin:18px 0' }, w.en),
+        h('div', { class: 'ask' }, 'מה הפירוש? כתבי בעברית (לא צריך כתיב מושלם)'),
+        input, note, buttons, after),
+    );
+    setTimeout(() => input.focus(), 150);
+  });
 }
 
 async function doDecode(base) {
@@ -305,6 +392,7 @@ function promptBlock(item) {
   if (item.tag) parts.push(h('div', { style: 'text-align:center' }, h('span', { class: 'mode-tag' }, item.tag)));
   if (item.kind === 'wmean') {
     parts.push(h('div', { class: 'bigword en', style: 'margin:18px 0' }, item.word.en), h('div', { class: 'ask' }, KIND_ASK.wmean));
+    if (item.speakWord) parts.push(h('div', { class: 'row center' }, h('button', { class: 'speak', onclick: () => speak(item.word.en) }, '🔊 שוב')));
     return parts;
   }
   if (item.kind === 'decode') {
@@ -376,7 +464,7 @@ function mcView(item, block, { feedback, header } = {}) {
       h('div', { class: 'card' }, ...promptBlock(item), optBox, after),
     );
     if (item.kind === 'hear') speak(item.word);
-    if ((item.kind === 'wread' && item.speakWord) || item.kind === 'decode') speak(item.word.en);
+    if (((item.kind === 'wread' || item.kind === 'wmean') && item.speakWord) || item.kind === 'decode') speak(item.word.en);
     const delay = item.kind === 'passage' ? 2500 : ['hear', 'wread', 'decode'].includes(item.kind) ? 900 : 1200;
     setTimeout(reveal, delay);
   });
@@ -446,8 +534,9 @@ function endCard() {
   const learned = rec.learnedToday.map((id) => WORD[id]?.en).filter(Boolean);
   const timeUp = E.elapsedMin(live) >= sessionTotal() - 0.01;
   const next =
-    dayIndex <= 1 ? 'מחר נחזור על כל המילים — ככה הן נשארות בזיכרון 🧠' :
-    dayIndex === 2 ? 'הערב: מבחן ניסיון 📝 — ומחר בבוקר עוד חזרה קצרה לפני המבחן.' :
+    dayIndex <= 1 ? 'מחר שני אימונים: בראשון תכתבי בעצמך את הפירושים ✍️, ובשני — מבחן ניסיון 📝' :
+    dayIndex === 2 && rec.mockDone ? 'מחר בבוקר עוד חזרה קצרה — ובהצלחה במבחן! 🍀' :
+    dayIndex === 2 ? 'באימון הבא: חזרה קצרה ואז מבחן ניסיון 📝' :
     'בהצלחה במבחן! את מוכנה 🍀';
 
   mount(
@@ -488,23 +577,44 @@ function mockIntro() {
 }
 
 function startMock() {
-  const qs = E.buildMock(state, { words: WORDS, sentenceItems: SENTENCE_ITEMS, passages: PASSAGES, ruleItems: RULE_ITEMS, canHear: canSpeak() });
-  mock = { qs, answers: [], token: ++loopToken };
-  runMock();
+  loopToken += 1;
+  runMock(() => { loopToken += 1; mock = null; home(); })
+    .then((res) => { if (res) mockResult(res, home, 'למסך הבית'); });
+}
+
+/** The exam simulation as the last block of day 2's second session. */
+async function mockInSession() {
+  const token = loopToken;
+  await new Promise((go) => mount(
+    h('div', { class: 'topbar' }, h('button', { class: 'x', onclick: exitSession, 'aria-label': 'יציאה' }, '✕')),
+    h('div', { class: 'card', style: 'text-align:center' },
+      h('h1', {}, '📝 עכשיו: מבחן ניסיון'),
+      h('div', { class: 'stat' }, 'כמו המבחן מחר: בלי רמזים ובלי שמיעה. את התשובות הנכונות נראה בסוף.'),
+      h('div', { class: 'muted' }, 'בערך 15 דקות. לאט ובזהירות — קוראים כל מילה עד הסוף!'),
+      h('div', { class: 'row center', style: 'margin-top:14px' }, h('button', { class: 'btn coral', onclick: go }, 'מתחילות! 🚀')))));
+  if (token !== loopToken) return;
+  const res = await runMock(exitSession);
+  if (!res || token !== loopToken) return;
+  sess.mockDone = true;
+  save();
+  await new Promise((go) => mockResult(res, go, 'סיום האימון'));
 }
 
 function mockHeader(i) {
   const pct = (i / mock.qs.length) * 100;
   return h('div', { class: 'topbar' },
-    h('button', { class: 'x', onclick: () => { loopToken += 1; mock = null; home(); }, 'aria-label': 'יציאה' }, '✕'),
+    h('button', { class: 'x', onclick: mock.exit, 'aria-label': 'יציאה' }, '✕'),
     h('div', { class: 'chip' }, `📝 שאלה ${i + 1} מתוך ${mock.qs.length}`),
     h('div', { class: 'timebar' }, h('div', { style: `width:${pct}%;background:var(--purple)` })));
 }
 
 const cleanHe = E.cleanHe;
 
-async function runMock() {
-  const token = mock.token;
+/** Runs the questions; resolves the result, or null if she left. */
+async function runMock(exit) {
+  const qs = E.buildMock(state, { words: WORDS, sentenceItems: SENTENCE_ITEMS, passages: PASSAGES, ruleItems: RULE_ITEMS, canHear: canSpeak() });
+  mock = { qs, answers: [], exit };
+  const token = loopToken;
   for (let i = 0; i < mock.qs.length; i++) {
     const q = mock.qs[i];
     let ans;
@@ -516,15 +626,15 @@ async function runMock() {
       const ok = await mcView(item, null, { feedback: false, header: mockHeader(i) });
       ans = { correct: ok };
     }
-    if (token !== loopToken) return;
+    if (token !== loopToken) return null;
     mock.answers.push(ans);
   }
   const res = E.applyMock(state, mock.qs, mock.answers, today());
   save();
-  mockResult(res);
+  return res;
 }
 
-function mockResult(res) {
+function mockResult(res, onDone, doneLabel) {
   sendReport();
   const rows = res.wrong.map((i) => {
     const q = mock.qs[i];
@@ -539,13 +649,13 @@ function mockResult(res) {
       h('div', { style: 'font-size:72px;font-weight:800;color:var(--good)' }, String(res.score)),
       h('div', { class: 'stat' }, msg)),
     rows.length ? h('div', { class: 'card' }, h('h2', {}, `מה כדאי לחזק (${rows.length})`), rows) : null,
-    h('div', { class: 'row center' }, h('button', { class: 'btn coral', onclick: home }, 'למסך הבית')),
+    h('div', { class: 'row center' }, h('button', { class: 'btn coral', onclick: onDone }, doneLabel)),
   );
   mock = null;
 }
 
 // ── parent view ────────────────────────────────────────────────────────────
-const BOX_LABEL = ['לא נבדקה', 'בלמידה', 'כמעט', 'נכון פעם אחת', 'יודעת בטוח'];
+const BOX_LABEL = ['לא נבדקה', 'בלמידה', 'כמעט', 'בוחרת נכון', 'כותבת לבד'];
 
 function parent() {
   if (updateReady) { save(); location.reload(); return; }
@@ -560,13 +670,14 @@ function parent() {
   mount(
     h('div', { class: 'spread' }, h('h1', {}, 'להורים'), h('button', { class: 'btn light', onclick: home }, 'חזרה')),
     h('div', { class: 'card' },
-      h('div', { class: 'headline' }, `מילים: ${ready}/${sum.total} ידועות (${sum.sure} מהן נבדקו בשני ימים שונים)`),
-      h('div', { class: 'small muted', style: 'margin:6px 0' }, 'לפי המורה: צריך לקרוא את המילים ולדעת את הפירוש (לא לכתוב). מילה נחשבת ידועה רק כשמיה קראה אותה ובחרה פירוש נכון בלי תמונה ובלי שמיעה. "יודעת בטוח" = נכון בשני ימים שונים.'),
+      h('div', { class: 'headline' }, `מילים: ${ready}/${sum.total} ידועות (${sum.sure} מהן "בטוח": כתבה את הפירוש לבד)`),
+      h('div', { class: 'small muted', style: 'margin:6px 0' }, 'לפי המורה: צריך לקרוא את המילים ולדעת את הפירוש (לא לכתוב באנגלית). מילה "ידועה" כשמיה בוחרת את הפירוש הנכון בלי תמונה. "בטוח" = ביום אחר היא גם כתבה את הפירוש בעברית בעצמה; שגיאות כתיב בעברית לא נחשבות.'),
       h('div', {}, `לא נבדקו: ${sum.unseen} · בלמידה: ${sum.learning}`),
       h('div', {}, `משפטים ושאלות: ${sb.done}/${sb.total} נכון · ${sb.shaky} לחזק · ${sb.unseen} לא נראו`),
       h('div', {}, `כללי קריאה: ${rb.done}/${rb.total} נכון · ${rb.shaky} לחזק · ${rb.unseen} לא נראו`),
       h('div', {}, `קריאה ושמיעה (לשמוע מילה ולמצוא אותה כתובה): ${db.done}/${db.total} נכון · ${db.shaky} לחזק · ${db.unseen} לא נראו`),
       h('div', {}, lastMock ? `מבחן ניסיון אחרון: ${lastMock.score} (${new Date(lastMock.at).toLocaleString('he-IL')})` : 'מבחן ניסיון: עוד לא נעשה')),
+    typedReviewCard(),
     hard.length ? h('div', { class: 'card' },
       h('h2', {}, 'מילים לתרגל יחד בעל-פה 🗣️'),
       h('div', { class: 'small muted' }, 'הראו למיה את המילה כתובה באנגלית: שתקרא אותה בקול ותגיד מה הפירוש. אלה המילים שהכי קשות לה כרגע.'),
@@ -604,6 +715,27 @@ function parent() {
         h('button', { class: 'btn light', onclick: resetAll }, 'איפוס כל ההתקדמות')),
       h('div', { style: 'margin-top:10px' }, `גרסה: ${BUILD}`)),
   );
+}
+
+// Typed answers the checker did not recognise: a parent can accept a synonym
+// it does not know (counted as correct from now on) or dismiss it.
+function typedReviewCard() {
+  const log = state.typedLog ?? [];
+  if (!log.length) return null;
+  const rows = log.map((e, i) => [e, i]).reverse().slice(0, 15);
+  return h('div', { class: 'card' },
+    h('h2', {}, '✍️ תשובות שהאפליקציה לא זיהתה'),
+    h('div', { class: 'small muted' }, 'שגיאות כתיב כבר מתקבלות. אם מיה כתבה פירוש נכון שהאפליקציה לא מכירה — לחצו "היא צדקה" והמילה תקבל את הנקודה.'),
+    h('table', {}, h('tbody', {}, rows.map(([e, i]) => {
+      const w = WORD[e.id];
+      return h('tr', {},
+        h('td', {}, en(w?.en ?? e.id)),
+        h('td', {}, `"${e.typed}"`),
+        h('td', { class: 'muted' }, w ? cleanHe(w.he) : ''),
+        h('td', {},
+          h('button', { class: 'btn light', style: 'padding:6px 10px;font-size:15px', onclick: () => { E.approveTyped(state, i); save(); sendReport(); parent(); } }, 'היא צדקה ✓'),
+          h('button', { class: 'btn ghost', style: 'padding:6px 10px;font-size:15px', onclick: () => { E.dismissTyped(state, i); save(); parent(); } }, 'הסתר')));
+    }))));
 }
 
 function resetAll() {

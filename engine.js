@@ -9,8 +9,12 @@
 //    box 1  learning   → 'pic': English word → Hebrew options WITH pictures
 //    box 2  almost     → 'read': Hebrew (+ spoken word) → find the written
 //                        English word among look-alikes (decoding practice)
-//    box 3  knows today  (English → Hebrew right cold today)
-//    box 4  knows for sure (right cold on TWO different days)
+//    box 3  knows it  (English → Hebrew multiple choice right cold)
+//    box 4  knows for sure: on a LATER day she TYPED the Hebrew meaning
+//           herself (recall, not recognition — Dima, 21 Nov). Typos are
+//           forgiven by checkMeaning(); spelling is not what is tested.
+//  Multiple-choice word items say the English word aloud as it appears; the
+//  typed step stays silent until she answers, like the paper exam.
 //  Every word is first PROBED cold (English → Hebrew, no picture, no audio):
 //  if she knows it, it jumps to box 3 and costs ~5 seconds; only unknown words
 //  get taught. A miss brings the word back after a short gap. Words missed
@@ -82,6 +86,8 @@ export function freshState() {
   return {
     v: 1,
     words: {},     // id → WordState
+    heExtra: {},   // word id → typed meanings a parent approved
+    typedLog: [],  // typed answers the checker did not recognise (parent review)
     bank: {},      // item id → BankState (sentences, passages, rules)
     taught: {},    // rule id → day it was taught
     sessions: [],  // finished/partial session records
@@ -101,6 +107,7 @@ export function wordState(state, id) {
       missDay: null,
       misses: 0,         // all-time misses (parent view: "hard words")
       recheck: false,    // relearning criterion pending
+      needType: false,   // the pending recheck is a typed one (a typed miss)
       seen: 0,
     };
   }
@@ -130,13 +137,34 @@ export function practiceDayIndex(state, today) {
  * practice (the teacher asked for reading + meaning), and it soaks up any
  * time the other blocks leave.
  */
-export function planFor(dayIndex) {
-  if (dayIndex <= 1) {
+export function planFor(dayIndex, nth = 1) {
+  if (dayIndex <= 1 && nth === 1) {
     return [
       { block: 'words', until: 14 },
       { block: 'sentences', until: 22 },
       { block: 'rules', until: 27 },
       { block: 'decode', until: 30 },
+    ];
+  }
+  // Day 2, first session: she types the meaning of every word she knew
+  // yesterday (~12 s each), so words get the bigger share.
+  if (dayIndex === 2 && nth === 1) {
+    return [
+      { block: 'words', until: 16 },
+      { block: 'sentences', until: 23 },
+      { block: 'rules', until: 28 },
+      { block: 'decode', until: 30 },
+    ];
+  }
+  // Day 2, second session: a short review of what is still open, then the
+  // exam simulation (untimed, ~15 min). Its misses go straight back into the
+  // ladder for the morning review.
+  if (dayIndex === 2 && nth === 2) {
+    return [
+      { block: 'words', until: 8 },
+      { block: 'sentences', until: 12 },
+      { block: 'rules', until: 15 },
+      { block: 'mock', until: Infinity },
     ];
   }
   return [
@@ -155,10 +183,13 @@ export function startSession(state, today, now = Date.now()) {
   for (const ws of Object.values(state.words)) ws.dueAt = 0;
   for (const b of Object.values(state.bank)) if (b.dueAt !== null) b.dueAt = 0;
   const dayIndex = practiceDayIndex(state, today);
+  const nth = state.sessions.filter((r) => r.day === today && !r.extra).length + 1;
   state.current = {
-    id: `s-${now}`,
+    id: `s-${now}-${state.sessions.length}`,
     day: today,
     dayIndex,
+    nth,                  // 1st, 2nd … regular session of the day (picks the plan)
+    mockDone: false,
     startedAt: now,
     activeMs: 0,
     bonusMin: 0,
@@ -222,6 +253,9 @@ export function finishSession(state, now = Date.now()) {
     id: s.id,
     day: s.day,
     dayIndex: s.dayIndex,
+    nth: s.nth ?? 1,
+    extra: !!s.extraUntil,
+    mockDone: !!s.mockDone,
     startedAt: s.startedAt,
     endedAt: now,
     minutes: Math.round(elapsedMin(s) * 10) / 10,
@@ -252,7 +286,9 @@ function resetDaily(ws, today) {
 
 /**
  * Next word item, or null when every word is done for today.
- * Returns { id, mode } with mode ∈ probe | pic | read | confirm | recheck.
+ * Returns { id, mode } with mode ∈ probe | pic | read | recheck | type.
+ * 'type' = she types the Hebrew meaning: the cross-day check of a word she
+ * knew on an earlier day, and the recheck after a typed miss.
  */
 export function pickWordItem(state, sess, words, today) {
   const n = sess.n;
@@ -275,9 +311,9 @@ export function pickWordItem(state, sess, words, today) {
     if (fresh) return { id: fresh[0].id, mode: 'probe' };
   }
 
-  // 3. cross-day confirmation of words known on an earlier day
-  const confirm = states.filter(([, ws]) => ws.box === 3 && ws.okDay && ws.okDay < today).filter(notLast);
-  if (confirm.length) return { id: confirm[0][0].id, mode: 'confirm' };
+  // 3. cross-day check of words known on an earlier day: type the meaning
+  const confirm = states.filter(([, ws]) => ws.box === 3 && ws.okDay && ws.okDay < today && !ws.recheck).filter(notLast);
+  if (confirm.length) return { id: confirm[0][0].id, mode: 'type' };
 
   // 4. nothing due: fill the gap with a cold probe (cheap if she knows the
   //    word, and it spaces out the loop), otherwise the soonest learning word
@@ -296,7 +332,7 @@ export function pickWordItem(state, sess, words, today) {
 }
 
 function asItem([w, ws]) {
-  if (ws.recheck && ws.box === 3) return { id: w.id, mode: 'recheck' };
+  if (ws.recheck && ws.box === 3) return { id: w.id, mode: ws.needType ? 'type' : 'recheck' };
   return { id: w.id, mode: ws.box === 1 ? 'pic' : 'read' };
 }
 
@@ -356,7 +392,23 @@ export function applyWordResult(state, sess, wordId, mode, outcome, today) {
       else if (outcome === 'second') { ws.box = 2; ws.recheck = false; ws.dueAt = n + 3; }
       else { ws.box = 1; ws.recheck = false; ws.dueAt = n + GAP_AFTER_MISS; }
       break;
-    case 'confirm':
+    case 'type':
+      if (outcome === 'first') {
+        knowsToday();
+        ws.recheck = false;
+        ws.needType = false;
+        ws.box = ws.days.length >= 2 ? 4 : 3;
+        if (ws.missToday > 0) learnedNow();
+      } else {
+        // She recognised it before but could not recall it: re-teach through
+        // the multiple-choice steps, then she types it again this session.
+        ws.box = 2;
+        ws.recheck = false;
+        ws.needType = true;
+        ws.dueAt = n + GAP_AFTER_MISS;
+      }
+      break;
+    case 'confirm': // older multiple-choice cross-day check (kept for saved sessions)
       if (outcome === 'first') {
         knowsToday();
         ws.box = ws.days.length >= 2 ? 4 : 3;
@@ -491,17 +543,20 @@ export function applyMock(state, qs, answers, today, now = Date.now()) {
       const ws = wordState(state, q.word.id);
       resetDaily(ws, today);
       if (ok) {
-        // "Sure" needs a cold success on an earlier day and no miss today.
-        const earlierDay = ws.days.some((d) => d < today);
-        ws.okDay = today;
-        if (!ws.days.includes(today)) ws.days.push(today);
-        if (ws.box >= 3 || ws.box === 0) ws.box = earlierDay && ws.missToday === 0 ? 4 : 3;
+        // A multiple-choice success never makes a word "sure" (that takes a
+        // typed meaning); it only counts an unseen word as known.
+        if (ws.box === 0) {
+          ws.box = 3;
+          ws.okDay = today;
+          if (!ws.days.includes(today)) ws.days.push(today);
+        }
       } else {
         ws.misses += 1;
         ws.missToday += 1;
         ws.box = ws.box === 0 ? 1 : Math.min(ws.box, 2);
         ws.dueAt = 0;
         ws.recheck = false;
+        ws.needType = false;
       }
     }
   });
@@ -556,4 +611,149 @@ export function lookAlikeOptions(word, words, rng = Math.random) {
   const ranked = shuffle(words.filter((w) => w.id !== word.id), rng)
     .sort((a, b) => lookAlike(word.en, b.en) - lookAlike(word.en, a.en));
   return [word, ...shuffle(ranked.slice(0, 6), rng).slice(0, 3)];
+}
+
+
+// ── typed Hebrew meaning ───────────────────────────────────────────────────
+//
+// She types the Hebrew meaning of an English word. Spelling is not tested, so
+// typos are forgiven, but a different word never is:
+//  1. normalise: no niqqud, punctuation, spaces; final letters → regular
+//     (ך→כ …); a leading definite ה is optional.
+//  2. compare with every accepted form of the target (content.js HE_ACCEPT +
+//     the `he` field + forms a parent approved) by an edit distance where
+//     letters that sound alike cost 0.3 (א/ע/ה, ט/ת, כ/ח/ק, ס/ש, ב/ו, ו/י)
+//     and adding/dropping a quiet letter (א ה ו י ע) costs 0.4.
+//  3. accept a typo only within a length-based allowance AND only if the
+//     answer is strictly closer to this word than to any other of the 64
+//     words — so "שני" for Tuesday is "that's Monday", never a typo.
+
+const HE_FINALS = { 'ך': 'כ', 'ם': 'מ', 'ן': 'נ', 'ף': 'פ', 'ץ': 'צ' };
+const HE_ALIKE = ['אעה', 'טת', 'כחק', 'סש', 'בו', 'וי'];
+const HE_QUIET = new Set('אהויע');
+
+export function heNorm(s) {
+  return String(s ?? '')
+    .normalize('NFC')
+    .replace(/[֑-ׇ]/g, '')
+    .replace(/[^א-ת]/g, '')
+    .replace(/[ךםןףץ]/g, (c) => HE_FINALS[c]);
+}
+
+function subCost(a, b) {
+  if (a === b) return 0;
+  return HE_ALIKE.some((g) => g.includes(a) && g.includes(b)) ? 0.3 : 1;
+}
+const indel = (c) => (HE_QUIET.has(c) ? 0.4 : 1);
+
+/** Weighted Damerau (optimal string alignment) distance on normalised text. */
+export function heDistance(a, b) {
+  const m = a.length, n = b.length;
+  const d = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 1; i <= m; i++) d[i][0] = d[i - 1][0] + indel(a[i - 1]);
+  for (let j = 1; j <= n; j++) d[0][j] = d[0][j - 1] + indel(b[j - 1]);
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      d[i][j] = Math.min(
+        d[i - 1][j] + indel(a[i - 1]),
+        d[i][j - 1] + indel(b[j - 1]),
+        d[i - 1][j - 1] + subCost(a[i - 1], b[j - 1]),
+      );
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 0.7);
+    }
+  }
+  return Math.round(d[m][n] * 100) / 100;
+}
+
+/** How far a typo may be from a form of this (normalised) length. */
+export function typoAllowance(len) {
+  return len <= 2 ? 0.45 : len <= 3 ? 0.8 : len <= 5 ? 1 : len <= 7 ? 1.5 : 2;
+}
+
+/** Accepted meanings of a word: [{ raw, n }] (n = normalised). */
+export function heForms(word, extra = {}) {
+  const raw = [...cleanHe(word.he).split('/'), ...(word.heAlt ?? []), ...(extra[word.id] ?? [])]
+    .map((x) => x.trim()).filter(Boolean);
+  const seen = new Set();
+  const out = [];
+  for (const r of raw) {
+    const n = heNorm(r);
+    if (n && !seen.has(n)) { seen.add(n); out.push({ raw: r, n }); }
+  }
+  return out;
+}
+
+function closest(variants, forms) {
+  let best = { d: Infinity, form: null };
+  for (const v of variants) for (const f of forms) {
+    const d = heDistance(v, f.n);
+    if (d < best.d) best = { d, form: f };
+  }
+  return best;
+}
+
+/**
+ * verdict: 'exact' | 'typo' (both correct) | 'other' (the meaning of another
+ * word: `other`) | 'wrong' | 'latin' (typed in English letters — not counted,
+ * she may retype) | 'empty'.
+ */
+export function checkMeaning(word, typed, words, extra = {}) {
+  const raw = String(typed ?? '').trim();
+  if (/[A-Za-z]/.test(raw)) return { verdict: 'latin' };
+  const t = heNorm(raw);
+  if (!t) return { verdict: 'empty' };
+  const variants = [t];
+  if (t.length > 2 && t[0] === 'ה') variants.push(t.slice(1));
+
+  const own = heForms(word, extra);
+  const ownSet = new Set(own.map((f) => f.n));
+  const mine = closest(variants, own);
+  if (mine.d === 0) return { verdict: 'exact', form: mine.form.raw };
+
+  let rival = { d: Infinity, word: null };
+  for (const w of words) {
+    if (w.id === word.id) continue;
+    const forms = heForms(w, extra).filter((f) => !ownSet.has(f.n)); // shared meanings (כיתה) are not rivals
+    const c = closest(variants, forms);
+    if (c.d < rival.d) rival = { d: c.d, word: w };
+  }
+  if (rival.d === 0) return { verdict: 'other', other: rival.word };
+  if (mine.d <= typoAllowance(mine.form.n.length) && mine.d < rival.d) return { verdict: 'typo', form: mine.form.raw };
+  return { verdict: 'wrong' };
+}
+
+/** Keep an unrecognised typed answer for the parent screen (last 40). */
+export function logTyped(state, entry) {
+  state.typedLog = state.typedLog ?? [];
+  state.typedLog.push(entry);
+  if (state.typedLog.length > 40) state.typedLog.splice(0, state.typedLog.length - 40);
+}
+
+/**
+ * A parent says an unrecognised answer was right: accept that meaning from now
+ * on, and give the word the credit a correct typed answer would have earned.
+ */
+export function approveTyped(state, index) {
+  const e = state.typedLog?.[index];
+  if (!e) return false;
+  state.heExtra = state.heExtra ?? {};
+  const list = (state.heExtra[e.id] = state.heExtra[e.id] ?? []);
+  if (!list.includes(e.typed)) list.push(e.typed);
+  const ws = wordState(state, e.id);
+  ws.misses = Math.max(0, ws.misses - 1);
+  if (!ws.days.includes(e.day)) ws.days.push(e.day);
+  ws.days.sort();
+  if (!ws.okDay || ws.okDay < e.day) ws.okDay = e.day;
+  ws.recheck = false;
+  ws.needType = false;
+  ws.box = ws.days.length >= 2 ? 4 : Math.max(ws.box, 3);
+  const n = heNorm(e.typed);
+  state.typedLog = state.typedLog.filter((x) => !(x.id === e.id && heNorm(x.typed) === n));
+  return true;
+}
+
+export function dismissTyped(state, index) {
+  if (!state.typedLog?.[index]) return false;
+  state.typedLog.splice(index, 1);
+  return true;
 }

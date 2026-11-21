@@ -14,12 +14,18 @@ No build step: static `index.html` + ES modules. Progress is kept in the tablet'
 - `npm test` (or `node --test`): 13 engine tests
 
 ## Method (same rules as Mia Math / Mia Reading)
-- Every word is first checked cold (English → Hebrew, no picture, no sound). Known
-  words cost one tap; only unknown ones are taught.
+- Every word is first checked cold (English → Hebrew, no picture). Multiple-choice
+  word items say the word aloud as it appears (Dima, 21 Nov). Known words cost one
+  tap; only unknown ones are taught.
 - Unknown words climb a ladder: teaching card → meaning with pictures → find the
   English word among look-alikes (with sound) → one more cold check later the same
   session.
-- "Knows for sure" = right cold on two different days (successive relearning).
+- "Knows for sure" = on a later day she TYPES the Hebrew meaning herself (silent
+  until she answers). Hebrew typos are forgiven by `checkMeaning()` (sound-alike
+  letters, missing ו/י, final letters, niqqud, leading ה) but an answer closer to
+  another word's meaning never is. A typed miss is re-taught by multiple choice and
+  typed again the same session. Unrecognised answers wait in the parent screen,
+  where "היא צדקה" accepts the synonym from then on.
 - First-attempt-only accuracy. Cold checks of new words never count as mistakes.
 - Stars: <60% → 0, 60–79% → 1, ≥80% → 2, plus combo bonus. Same as Math.
 - Multiple choice gets one attempt. Options appear after a pause, so she reads first.
@@ -27,7 +33,9 @@ No build step: static `index.html` + ES modules. Progress is kept in the tablet'
 
 ## Daily plan (cumulative minutes, unused time rolls forward)
 Day 1: words → 14, sentences/passages → 22, reading rules → 27, hear-and-find → 30.
-Day 2 and later: words → 9, sentences → 17, rules → 24, hear-and-find → 30.
+Day 2, session 1: words (typing) → 16, sentences → 23, rules → 28, hear-and-find → 30.
+Day 2, session 2: words → 8, sentences → 12, rules → 15, then the mock exam (silent).
+Later sessions: words → 9, sentences → 17, rules → 24, hear-and-find → 30.
 Practice test (about 8 min, 100 points), best on Sunday evening.
 
 ## Run locally
