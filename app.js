@@ -2,7 +2,7 @@
 import { WORDS, GROUPS, SENTENCE_ITEMS, PASSAGES, RULES, RULE_ITEMS } from './content.js';
 import * as E from './engine.js';
 
-const BUILD = '2026-11-20b';
+const BUILD = '2026-11-21';
 const KEY = 'miaEnglish.v1';
 const WORD = Object.fromEntries(WORDS.map((w) => [w.id, w]));
 const RULE = Object.fromEntries(RULES.map((r) => [r.id, r]));
@@ -72,7 +72,7 @@ function h(tag, attrs = {}, ...kids) {
     else if (k === 'html') el.innerHTML = v;
     else el.setAttribute(k, v === true ? '' : v);
   }
-  for (const kid of kids.flat()) {
+  for (const kid of kids.flat(Infinity)) {
     if (kid == null || kid === false) continue;
     el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
   }
@@ -666,14 +666,18 @@ function sendReport() {
   if (body === lastSentBody) return;
   lastSentBody = body;
   fetch(REPORT_URL, { method: 'POST', body, keepalive: true, headers: { 'Content-Type': 'text/plain' } })
-    .then((r) => setReportStatus({ at: Date.now(), ok: r.ok, code: r.status }))
+    .then((r) => {
+      // A rejected code is useless: forget it so the parent screen asks for it again.
+      if (r.status === 401) { try { localStorage.removeItem(PAIR_KEY); } catch {} lastSentBody = ''; }
+      setReportStatus({ at: Date.now(), ok: r.ok, code: r.status });
+    })
     .catch(() => { lastSentBody = ''; setReportStatus({ at: Date.now(), ok: false, code: 0 }); });
 }
 
 function reportCard() {
   const key = reportKey();
   const st = reportStatus();
-  const input = h('input', { type: 'text', placeholder: 'קוד חיבור', dir: 'ltr', style: 'font-size:16px;padding:10px;border-radius:12px;border:2px solid #E3E5EF;flex:1;min-width:0' });
+  const input = h('input', { type: 'text', placeholder: 'קוד חיבור', dir: 'ltr', autocapitalize: 'none', autocomplete: 'off', autocorrect: 'off', spellcheck: 'false', style: 'font-size:16px;padding:10px;border-radius:12px;border:2px solid #E3E5EF;flex:1;min-width:0' });
   const when = st ? new Date(st.at).toLocaleString('he-IL') : '';
   return h('div', { class: 'card' },
     h('h2', {}, '📧 דיווח למייל היומי'),
@@ -684,9 +688,11 @@ function reportCard() {
           h('div', { class: 'row', style: 'margin-top:8px' },
             h('button', { class: 'btn light', onclick: () => { lastSentBody = ''; sendReport(); setTimeout(parent, 1500); } }, 'שלחי עכשיו'),
             h('button', { class: 'btn ghost', onclick: () => { if (!confirm('לנתק את הדיווח למייל?')) return; localStorage.removeItem(PAIR_KEY); localStorage.removeItem(SENT_KEY); parent(); } }, 'ניתוק')))
-      : h('div', { class: 'row', style: 'margin-top:8px' },
+      : h('div', { style: 'margin-top:8px' },
+        st && st.code === 401 ? h('div', { style: 'color:#C0392B;font-weight:700' }, '❌ קוד החיבור לא התקבל. הכי פשוט: לפתוח שוב את קישור החיבור בטאבלט. בהקלדה — אותיות גדולות וקטנות חשובות.') : null,
+        h('div', { class: 'row', style: 'margin-top:8px' },
           input,
-          h('button', { class: 'btn teal', onclick: () => { const v = input.value.trim(); if (v.length < 16) return; localStorage.setItem(PAIR_KEY, v); lastSentBody = ''; sendReport(); setTimeout(parent, 1500); } }, 'חיבור')));
+          h('button', { class: 'btn teal', onclick: () => { const v = input.value.trim(); if (v.length < 16) return; localStorage.setItem(PAIR_KEY, v); lastSentBody = ''; sendReport(); setTimeout(parent, 1500); } }, 'חיבור'))));
 }
 
 // One-time pairing link: https://…/mia-english/#pair=<key>
