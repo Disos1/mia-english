@@ -1,8 +1,13 @@
 // Mia English — UI. All learning decisions live in engine.js.
-import { WORDS, GROUPS, SENTENCE_ITEMS, PASSAGES, RULES, RULE_ITEMS } from './content.js';
-import * as E from './engine.js';
+// index.html loads this file as app.js?v=<build from version.json>; the same
+// tag on the data and engine modules keeps a tablet's cache from mixing builds.
+const V = new URL(import.meta.url).searchParams.get('v');
+const Q = V ? `?v=${encodeURIComponent(V)}` : '';
+const { WORDS, GROUPS, SENTENCE_ITEMS, PASSAGES, RULES, RULE_ITEMS } = await import(`./content.js${Q}`);
+const E = await import(`./engine.js${Q}`);
 
-const BUILD = '2026-11-21';
+const BUILD = '2026-11-21b'; // keep equal to version.json
+let updateReady = false; // a newer build was published; reload at the next safe screen
 const KEY = 'miaEnglish.v1';
 const WORD = Object.fromEntries(WORDS.map((w) => [w.id, w]));
 const RULE = Object.fromEntries(RULES.map((r) => [r.id, r]));
@@ -88,6 +93,7 @@ const speakBtn = (text, label = '🔊') => canSpeak() ? h('button', { class: 'sp
 function totalStars() { return state.sessions.reduce((a, s) => a + (s.stars || 0), 0); }
 
 function home() {
+  if (updateReady) { save(); location.reload(); return; }
   const sum = E.wordSummary(state, WORDS);
   const resume = state.current && state.current.day === today();
   const dayIdx = E.practiceDayIndex(state, today());
@@ -542,6 +548,7 @@ function mockResult(res) {
 const BOX_LABEL = ['לא נבדקה', 'בלמידה', 'כמעט', 'נכון פעם אחת', 'יודעת בטוח'];
 
 function parent() {
+  if (updateReady) { save(); location.reload(); return; }
   const sum = E.wordSummary(state, WORDS);
   const hard = hardWords();
   const sb = E.bankSummary(state, SENTENCE_BANK);
@@ -590,12 +597,12 @@ function parent() {
         h('div', { class: 'muted' }, 'עוד אין אימונים.'),
       h('div', { class: 'small muted', style: 'margin-top:8px' }, 'דיוק נספר רק בניסיון הראשון. בדיקה של מילה שמיה עוד לא למדה לא נחשבת כטעות.')),
     h('div', { class: 'card small muted' },
-      h('div', {}, `השמעה באנגלית: ${canSpeak() ? `פעילה (${enVoice.name})` : 'לא זמינה במכשיר — שאלות "הקשיבי" מדולגות'}`),
-      h('div', {}, `גרסה: ${BUILD}`)),
+      h('div', {}, `השמעה באנגלית: ${canSpeak() ? `פעילה (${enVoice.name})` : 'לא זמינה במכשיר — שאלות "הקשיבי" מדולגות'}`)),
     reportCard(),
     h('div', { class: 'card small muted' },
       h('div', { class: 'row', style: 'margin-top:10px' },
-        h('button', { class: 'btn light', onclick: resetAll }, 'איפוס כל ההתקדמות'))),
+        h('button', { class: 'btn light', onclick: resetAll }, 'איפוס כל ההתקדמות')),
+      h('div', { style: 'margin-top:10px' }, `גרסה: ${BUILD}`)),
   );
 }
 
@@ -608,7 +615,17 @@ function resetAll() {
 }
 
 // Leaving mid-session keeps it resumable; send the latest summary on the way out.
-document.addEventListener('visibilitychange', () => { if (document.hidden) { save(); sendReport(); } });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { save(); sendReport(); } else checkForUpdate(); });
+
+// A tablet can keep the page open for days. When it comes back to the front,
+// look for a newer build; it loads at the next home or parent screen, never mid-question.
+function checkForUpdate() {
+  fetch(`version.json?t=${Date.now()}`, { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => { if (j?.build && j.build !== BUILD) updateReady = true; })
+    .catch(() => {});
+}
+window.addEventListener('pageshow', (e) => { if (e.persisted) checkForUpdate(); });
 
 function hardWords() {
   return WORDS.map((w) => [w, state.words[w.id]]).filter(([, s]) => s && (s.misses >= 2 || (s.box > 0 && s.box < 3)))

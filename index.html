@@ -13,6 +13,15 @@
 </head>
 <body>
   <main id="app" aria-live="polite"></main>
-  <script type="module" src="app.js"></script>
+  <script type="module">
+    // Always run the newest build: version.json is never cached, and its build
+    // tag makes app.js (and the modules it loads) a fresh URL after each update.
+    let v = String(Date.now());
+    try {
+      const r = await fetch(`version.json?t=${Date.now()}`, { cache: 'no-store' });
+      if (r.ok) v = (await r.json()).build || v;
+    } catch {}
+    await import(`./app.js?v=${encodeURIComponent(v)}`);
+  </script>
 </body>
 </html>
